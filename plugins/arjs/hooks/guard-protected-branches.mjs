@@ -12,12 +12,24 @@
 // falling back to the session's cwd. A push that reaches `main` is blocked
 // whatever the local refs say: a missing `origin/main` only means it was never
 // fetched, not that the remote has none. The first push of a new repository is
-// a one-off for a human to make.
-import { readFileSync } from "node:fs";
+// a one-off for a human to make. A `git switch` or `git checkout` earlier in
+// the same command sets the branch that later commits and pushes in that
+// directory run on.
+//
+// Git is spawned only when the verdict needs it: the current branch for a
+// commit, a push without refspecs or a `HEAD` refspec, and the scope check
+// only for what would be blocked.
+import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import { git, isArjsRepo } from "./scope.mjs";
 
-const input = JSON.parse(readFileSync(0, "utf8") || "{}");
+// Malformed input is not this hook's to report: let the tool call through.
+let input;
+try {
+  input = JSON.parse(readFileSync(0, "utf8") || "{}") ?? {};
+} catch {
+  process.exit(0);
+}
 const command = input.tool_input?.command || "";
 const PROTECTED = "main";
 const POWERSHELL = input.tool_name === "PowerShell";
@@ -47,8 +59,31 @@ const POWERSHELL_CD_COMMANDS = new Set([
   "pushd",
 ]);
 
-/** Words that can precede the command a simple command runs. */
+/**
+ * Words that can precede the command a simple command runs: wrappers, and the
+ * shell keywords left in front of it once a command is split into segments,
+ * as `then` in `if true; then git commit; fi` or `if` in `if git commit; then`.
+ */
 const WRAPPERS = new Set(["env", "command", "exec", "nohup", "time", "rtk"]);
+const KEYWORDS = new Set([
+  "then",
+  "do",
+  "else",
+  "elif",
+  "!",
+  "if",
+  "while",
+  "until",
+]);
+
+/**
+ * Options of `git switch` and `git checkout` whose value is the branch they
+ * create and check out.
+ */
+const CREATE_OPTIONS = {
+  switch: new Set(["-c", "-C", "--create", "--force-create", "--orphan"]),
+  checkout: new Set(["-b", "-B", "--orphan"]),
+};
 
 /**
  * Split a shell command into simple commands on && || ; | and newlines, but
@@ -56,6 +91,12 @@ const WRAPPERS = new Set(["env", "command", "exec", "nohup", "time", "rtk"]);
  * backslash-newline is a line continuation, not a boundary: the shell runs
  * `git \<newline>commit` as `git commit`. In PowerShell the continuation is a
  * backtick-newline, and a backslash is only a path separator.
+ *
+ * Braces that open a block split too, so the body of PowerShell's
+ * `if ($?) { git commit }` or a Bash `{ git commit; }` group is a command of
+ * its own. A brace opens a block only at the start of a word or after `)`; the
+ * one in a revision such as `HEAD@{0}`, or in `${VAR}`, stays in its word, and
+ * so does the `}` closing it.
  */
 function segments(cmd) {
   const s = cmd.replace(POWERSHELL ? /`\r?\n/g : /\\\r?\n/g, " ");
@@ -63,6 +104,7 @@ function segments(cmd) {
   const out = [];
   let cur = "";
   let quote = null;
+  let blocks = 0;
   for (let i = 0; i < s.length; i++) {
     const c = s[i];
     if (quote) {
@@ -84,6 +126,14 @@ function segments(cmd) {
     } else if (c === ";" || c === "|" || c === "\n") {
       out.push(cur);
       cur = "";
+    } else if (c === "{" && /(^|[\s)])$/.test(cur)) {
+      out.push(cur);
+      cur = "";
+      blocks += 1;
+    } else if (c === "}" && blocks > 0) {
+      out.push(cur);
+      cur = "";
+      blocks -= 1;
     } else {
       cur += c;
     }
@@ -114,12 +164,16 @@ function words(seg) {
 
 /**
  * Index of `git` when it is the command this simple command runs: the first
- * word, after any `VAR=value` assignments and wrappers such as `env` or `rtk`.
- * -1 when git is only an argument, as in `echo git commit`.
+ * word, after any `VAR=value` assignments, wrappers such as `env` or `rtk`,
+ * and shell keywords such as `then`. -1 when git is only an argument, as in
+ * `echo git commit`, or in a condition such as PowerShell's `if ($?)`.
  */
 function gitIndex(w) {
   let i = 0;
-  while (i < w.length && (/^[A-Za-z_]\w*=/.test(w[i]) || WRAPPERS.has(w[i]))) {
+  while (
+    i < w.length &&
+    (/^[A-Za-z_]\w*=/.test(w[i]) || WRAPPERS.has(w[i]) || KEYWORDS.has(w[i]))
+  ) {
     i += 1;
   }
   return i < w.length && /^(.*[/\\])?git(\.exe)?$/i.test(w[i]) ? i : -1;
@@ -131,7 +185,65 @@ function nativePath(p) {
   return m ? `${m[1].toUpperCase()}:${m[2] || "/"}` : p;
 }
 
-function block(reason) {
+/**
+ * The branch `git switch` or `git checkout` with `args` leaves checked out in
+ * `dir`: "" when it detaches HEAD, undefined when it is not a branch change
+ * this hook can name (`git switch -`, `git checkout -- file`, a path).
+ */
+function switchedTo(sub, args, dir) {
+  let created;
+  let detach = false;
+  let pathspec = false;
+  const positional = [];
+  for (let k = 0; k < args.length; k++) {
+    const a = args[k];
+    if (a === "--") {
+      pathspec = true;
+      break;
+    }
+    const [name, value] = a.startsWith("--") ? a.split(/=(.*)/s) : [a];
+    if (CREATE_OPTIONS[sub].has(name)) {
+      created = value ?? args[++k];
+    } else if (name === "--detach" || (sub === "switch" && a === "-d")) {
+      detach = true;
+    } else if (!a.startsWith("-")) {
+      positional.push(a);
+    }
+  }
+  if (created) return created;
+  if (detach) return "";
+  if (sub === "switch") return positional[0];
+  // `git checkout <branch>`: a lone name that looks like a branch and is not
+  // a path in the repository, with no pathspec after it.
+  const [name] = positional;
+  const branchLike =
+    positional.length === 1 &&
+    /^\w[\w./-]*$/.test(name) &&
+    !name.includes("..") &&
+    name !== "HEAD" &&
+    !existsSync(resolve(dir, name));
+  return !pathspec && branchLike ? name : undefined;
+}
+
+/** Per directory: the branch checked out, "" when detached, null if unknown. */
+const branches = new Map();
+function currentBranch(dir) {
+  if (!branches.has(dir)) {
+    branches.set(dir, git(dir, ["branch", "--show-current"]));
+  }
+  return branches.get(dir);
+}
+
+/** Per directory: whether it is an AR-js-org repository (see scope.mjs). */
+const scopes = new Map();
+
+/**
+ * Block the tool call, with `reason`, when `dir` is an AR-js-org repository.
+ * Anywhere else, or in no repository at all, return and let it through.
+ */
+function block(dir, reason) {
+  if (!scopes.has(dir)) scopes.set(dir, isArjsRepo(dir));
+  if (!scopes.get(dir)) return;
   console.error(
     `Blocked: ${reason}. Work on a feature branch and open a pull request ` +
       "(see the repository's AGENTS.md, 'Git').",
@@ -172,26 +284,29 @@ for (const seg of segments(command)) {
       i += 1;
     }
   }
+  dir = resolve(dir);
   const sub = w[i];
-  if (sub !== "commit" && sub !== "push") continue;
+  const args = w.slice(i + 1);
 
-  if (!isArjsRepo(dir)) continue; // not an AR-js-org repository, or none at all
-
-  const branch = git(dir, ["branch", "--show-current"]);
-  if (branch === null) continue; // not a repository
-
-  if (sub === "commit") {
-    if (branch === PROTECTED) {
-      block(`'git commit' on '${PROTECTED}' in ${dir}`);
-    }
+  if (sub === "switch" || sub === "checkout") {
+    const branch = switchedTo(sub, args, dir);
+    if (branch !== undefined) branches.set(dir, branch);
     continue;
   }
 
+  if (sub === "commit") {
+    if (currentBranch(dir) === PROTECTED) {
+      block(dir, `'git commit' on '${PROTECTED}' in ${dir}`);
+    }
+    continue;
+  }
+  if (sub !== "push") continue;
+
   // push: positional args after the options are [remote] [refspec...]
-  const args = w.slice(i + 1);
   const pushesAll = args.find((a) => a === "--all" || a === "--mirror");
   if (pushesAll) {
-    block(`'git push ${pushesAll}' includes '${PROTECTED}' in ${dir}`);
+    block(dir, `'git push ${pushesAll}' includes '${PROTECTED}' in ${dir}`);
+    continue;
   }
   // Collect the positional arguments: skip options, including the value of
   // those that take one as the next word, and take everything after `--`.
@@ -211,14 +326,20 @@ for (const seg of segments(command)) {
   // positional argument may be either, so every one is checked as a refspec.
   const refspecs = repoOption ? positional : positional.slice(1);
   // Each refspec's destination: after the colon if there is one, without the
-  // force marker `+`, and with `HEAD` meaning the branch checked out.
-  const targets = refspecs.length
-    ? refspecs.map((r) => {
-        const dst = r.replace(/^\+/, "").split(":").pop();
-        return dst === "HEAD" ? branch : dst;
-      })
-    : [branch];
-  if (targets.some(reachesProtected)) {
-    block(`'git push' to '${PROTECTED}' in ${dir}`);
+  // force marker `+`, and with `HEAD` meaning the branch checked out. With no
+  // refspec the branch checked out is pushed, unless `--tags` asks for tags
+  // alone (`--follow-tags` pushes the branch as well).
+  let targets;
+  if (refspecs.length) {
+    targets = refspecs.map((r) => {
+      const dst = r.replace(/^\+/, "").split(":").pop();
+      return dst === "HEAD" ? currentBranch(dir) : dst;
+    });
+  } else {
+    targets = args.includes("--tags") ? [] : [currentBranch(dir)];
+  }
+  // A null branch: not a repository, or git could not tell.
+  if (targets.some((t) => t && reachesProtected(t))) {
+    block(dir, `'git push' to '${PROTECTED}' in ${dir}`);
   }
 }

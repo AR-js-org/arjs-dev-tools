@@ -56,9 +56,17 @@ export function git(cwd, ...args) {
 }
 
 export function runHook(hook, input) {
-  const r = spawnSync(process.execPath, [hook], {
-    input: JSON.stringify(input),
-    env: GIT_ENV,
+  return runHookRaw(hook, JSON.stringify(input));
+}
+
+/**
+ * Run a hook fed `stdin` as written, valid JSON or not. `nodeArgs` go before
+ * the script, and `env` adds to the isolated git environment.
+ */
+export function runHookRaw(hook, stdin, { nodeArgs = [], env = {} } = {}) {
+  const r = spawnSync(process.execPath, [...nodeArgs, hook], {
+    input: stdin,
+    env: { ...GIT_ENV, ...env },
     encoding: "utf8",
   });
   return { status: r.status, stdout: r.stdout, stderr: r.stderr };

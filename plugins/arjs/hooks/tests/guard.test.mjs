@@ -1,8 +1,18 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { GUARD, cleanupGitEnv, git, guard, runHook } from "./helpers.mjs";
+import {
+  GUARD,
+  cleanupGitEnv,
+  git,
+  guard,
+  runHook,
+  runHookRaw,
+} from "./helpers.mjs";
+
+// `node --import` takes a URL: a Windows path would read as a `d:` scheme.
+const COUNT_GIT = new URL("./count-git.mjs", import.meta.url).href;
 
 /**
  * The branch guard, run as Claude Code runs it: a Node process fed the hook's
@@ -222,6 +232,99 @@ describe("guard-protected-branches", () => {
   it("matches git case-insensitively in PowerShell", () => {
     expect(guard("Git commit -m x", onMain, "PowerShell")).toBe(2);
     expect(guard("Git commit -m x", onFeature, "PowerShell")).toBe(0);
+  });
+
+  it("follows a git switch or checkout earlier in the same command", () => {
+    // The release skill's dev re-sync, run right after tagging on main.
+    expect(
+      guard("git switch dev && git merge --ff-only origin/main && git push", onMain),
+    ).toBe(0);
+    expect(guard("git switch main && git commit -m x", onFeature)).toBe(2);
+    expect(guard("git switch -c feat/y && git commit -m x", onMain)).toBe(0);
+    expect(guard("git checkout -b feat/y && git push -u origin feat/y", onMain)).toBe(0);
+    expect(guard("git checkout -b feat/y && git push -u origin HEAD", onMain)).toBe(0);
+    expect(guard("git checkout main && git commit -m x", onFeature)).toBe(2);
+    expect(guard(`git -C "${onMain}" switch dev && git -C "${onMain}" push`, onFeature)).toBe(0);
+    // A switch in another repository says nothing about this one.
+    expect(guard(`git -C "${onFeature}" switch dev && git commit -m x`, onMain)).toBe(2);
+  });
+
+  it("does not take a checked-out path for a branch", () => {
+    // a.txt exists in the repository: restoring it leaves the branch alone.
+    expect(guard("git checkout a.txt && git commit -m x", onMain)).toBe(2);
+    expect(guard("git checkout -- a.txt && git commit -m x", onMain)).toBe(2);
+    expect(guard("git checkout feature -- a.txt && git commit -m x", onMain)).toBe(2);
+  });
+
+  it("sees git inside PowerShell and Bash conditionals", () => {
+    expect(
+      guard("git add -A; if ($?) { git commit -m x }", onMain, "PowerShell"),
+    ).toBe(2);
+    expect(
+      guard("git add -A; if ($?) { git push origin main }", onMain, "PowerShell"),
+    ).toBe(2);
+    expect(guard("git add -A; if ($?) { git commit -m x }", onFeature, "PowerShell")).toBe(0);
+    expect(guard("if true; then git commit -m x; fi", onMain)).toBe(2);
+    expect(guard("if true; then git commit -m x; fi", onFeature)).toBe(0);
+    expect(guard("if git commit -m x; then echo ok; fi", onMain)).toBe(2);
+    expect(guard("true && { git commit -m x; }", onMain)).toBe(2);
+    expect(guard("! git commit -m x", onMain)).toBe(2);
+  });
+
+  it("does not split on braces inside a revision or quotes", () => {
+    expect(guard("git push origin HEAD@{0}:main", onFeature)).toBe(2);
+    expect(guard("git push origin HEAD@{0}:feature", onFeature)).toBe(0);
+    expect(guard('git commit -m "{ git push origin main }"', onFeature)).toBe(0);
+  });
+
+  it("allows a push of tags alone, but not --follow-tags from main", () => {
+    expect(guard("git push --tags", onMain)).toBe(0);
+    expect(guard("git push origin --tags", onMain)).toBe(0);
+    expect(guard("git push --follow-tags", onMain)).toBe(2);
+    expect(guard("git push origin --tags main", onFeature)).toBe(2);
+  });
+
+  it("exits quietly on malformed input", () => {
+    for (const stdin of ["\n", "not json", "null"]) {
+      const r = runHookRaw(GUARD, stdin);
+      expect(r.status).toBe(0);
+      expect(r.stderr).toBe("");
+    }
+  });
+
+  it("spawns git only when the verdict needs it", () => {
+    const log = join(base, "git-spawns.log");
+    /** The git invocations the guard makes for `command` from `cwd`. */
+    function spawns(command, cwd, toolName = "Bash") {
+      rmSync(log, { force: true });
+      const r = runHookRaw(
+        GUARD,
+        JSON.stringify({ tool_name: toolName, tool_input: { command }, cwd }),
+        { nodeArgs: ["--import", COUNT_GIT], env: { GIT_SPAWN_LOG: log } },
+      );
+      const calls = existsSync(log)
+        ? readFileSync(log, "utf8").split("\n").filter(Boolean)
+        : [];
+      return { status: r.status, calls };
+    }
+    expect(spawns("git status", onMain).calls).toHaveLength(0);
+    expect(spawns("git push origin feature", onFeature).calls).toHaveLength(0);
+    // The branch only: an allowed commit needs no scope check.
+    expect(spawns("git commit -m x", onFeature).calls).toEqual([
+      "branch --show-current",
+    ]);
+    // Read once per directory, not once per segment.
+    expect(spawns("git commit -m a && git commit -m b", onFeature).calls).toHaveLength(1);
+    // A blocked commit: the branch, then the scope.
+    const blocked = spawns("git commit -m x", onMain);
+    expect(blocked.status).toBe(2);
+    expect(blocked.calls).toHaveLength(2);
+    // An explicit refspec to main needs no branch, only the scope.
+    expect(spawns("git push origin main", onFeature).calls).toHaveLength(1);
+    // The switch names the branch: nothing to ask git.
+    expect(
+      spawns("git switch dev && git merge --ff-only origin/main && git push", onMain).calls,
+    ).toHaveLength(0);
   });
 
   it("names no branch flow in the message", () => {
