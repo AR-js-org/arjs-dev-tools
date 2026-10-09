@@ -249,6 +249,25 @@ describe("guard-protected-branches", () => {
     expect(guard(`git -C "${onFeature}" switch dev && git commit -m x`, onMain)).toBe(2);
   });
 
+  it("honours a recorded switch only across &&", () => {
+    // The commit may run on the old branch: the switch failed, or ran
+    // regardless of it.
+    expect(guard("git switch missing; git commit -m x", onMain)).toBe(2);
+    expect(guard("git switch dev || git commit -m x", onMain)).toBe(2);
+    expect(guard("git switch dev\ngit commit -m x", onMain)).toBe(2);
+    expect(
+      guard("git switch feat/new; git add -A; git commit -m x", onMain, "PowerShell"),
+    ).toBe(2);
+    // A switch to main may have succeeded: it holds across any separator.
+    expect(guard("git switch main; git commit -m x", onFeature)).toBe(2);
+    expect(guard("git switch main || git commit -m x", onFeature)).toBe(2);
+    // Across && only, the recorded branch still holds.
+    expect(
+      guard("git switch dev && git merge --ff-only origin/main && git push", onMain),
+    ).toBe(0);
+    expect(guard("git checkout -b feat/y && git push -u origin feat/y", onMain)).toBe(0);
+  });
+
   it("does not take a checked-out path for a branch", () => {
     // a.txt exists in the repository: restoring it leaves the branch alone.
     expect(guard("git checkout a.txt && git commit -m x", onMain)).toBe(2);
@@ -275,6 +294,12 @@ describe("guard-protected-branches", () => {
     expect(guard("git push origin HEAD@{0}:main", onFeature)).toBe(2);
     expect(guard("git push origin HEAD@{0}:feature", onFeature)).toBe(0);
     expect(guard('git commit -m "{ git push origin main }"', onFeature)).toBe(0);
+    // Inside a block, the brace closing a revision does not close the block.
+    expect(
+      guard("if ($?) { git push origin HEAD@{0}:main }", onFeature, "PowerShell"),
+    ).toBe(2);
+    expect(guard("true && { git push origin HEAD@{0}:main; }", onFeature)).toBe(2);
+    expect(guard("true && { git push origin HEAD@{0}:feature; }", onFeature)).toBe(0);
   });
 
   it("allows a push of tags alone, but not --follow-tags from main", () => {

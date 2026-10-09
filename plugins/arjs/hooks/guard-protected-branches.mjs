@@ -13,8 +13,9 @@
 // whatever the local refs say: a missing `origin/main` only means it was never
 // fetched, not that the remote has none. The first push of a new repository is
 // a one-off for a human to make. A `git switch` or `git checkout` earlier in
-// the same command sets the branch that later commits and pushes in that
-// directory run on.
+// the same command, joined to them by `&&` only, sets the branch that later
+// commits and pushes in that directory run on (a switch to `main` holds
+// across any separator).
 //
 // Git is spawned only when the verdict needs it: the current branch for a
 // commit, a push without refspecs or a `HEAD` refspec, and the scope check
@@ -96,7 +97,11 @@ const CREATE_OPTIONS = {
  * `if ($?) { git commit }` or a Bash `{ git commit; }` group is a command of
  * its own. A brace opens a block only at the start of a word or after `)`; the
  * one in a revision such as `HEAD@{0}`, or in `${VAR}`, stays in its word, and
- * so does the `}` closing it.
+ * so does the `}` closing it, even inside a block.
+ *
+ * Each segment comes with the separator that ends it (`&&`, `||`, `;`, `|`,
+ * newline, `{` or `}`; null for the last one), and empty segments are kept so
+ * that no separator is lost.
  */
 function segments(cmd) {
   const s = cmd.replace(POWERSHELL ? /`\r?\n/g : /\\\r?\n/g, " ");
@@ -104,7 +109,13 @@ function segments(cmd) {
   const out = [];
   let cur = "";
   let quote = null;
-  let blocks = 0;
+  let blocks = 0; // open blocks
+  let inWord = 0; // open braces inside a word, as in `HEAD@{0}`
+  const end = (sep) => {
+    out.push({ text: cur.trim(), sep });
+    cur = "";
+    inWord = 0;
+  };
   for (let i = 0; i < s.length; i++) {
     const c = s[i];
     if (quote) {
@@ -120,26 +131,28 @@ function segments(cmd) {
       quote = c;
       cur += c;
     } else if (s.startsWith("&&", i) || s.startsWith("||", i)) {
-      out.push(cur);
-      cur = "";
+      end(s.slice(i, i + 2));
       i += 1;
     } else if (c === ";" || c === "|" || c === "\n") {
-      out.push(cur);
-      cur = "";
+      end(c);
     } else if (c === "{" && /(^|[\s)])$/.test(cur)) {
-      out.push(cur);
-      cur = "";
+      end(c);
       blocks += 1;
+    } else if (c === "{") {
+      inWord += 1;
+      cur += c;
+    } else if (c === "}" && inWord > 0) {
+      inWord -= 1;
+      cur += c;
     } else if (c === "}" && blocks > 0) {
-      out.push(cur);
-      cur = "";
+      end(c);
       blocks -= 1;
     } else {
       cur += c;
     }
   }
-  out.push(cur);
-  return out.map((seg) => seg.trim()).filter(Boolean);
+  end(null);
+  return out;
 }
 
 /**
@@ -225,13 +238,33 @@ function switchedTo(sub, args, dir) {
   return !pathspec && branchLike ? name : undefined;
 }
 
-/** Per directory: the branch checked out, "" when detached, null if unknown. */
-const branches = new Map();
+/**
+ * Per directory: the branch a `git switch` or `git checkout` earlier in the
+ * command checked out ("" when detached). It holds only while every separator
+ * since the switch is `&&`: after `;`, `||` or the like the switch may have
+ * failed and the next command still run. A recorded `main` is kept across any
+ * separator, since that switch may have succeeded.
+ */
+const switched = new Map();
+
+/** Per directory: the branch git reports (null when it cannot tell). */
+const reported = new Map();
+
+/** The branch checked out in `dir`: as switched to, else as git reports. */
 function currentBranch(dir) {
-  if (!branches.has(dir)) {
-    branches.set(dir, git(dir, ["branch", "--show-current"]));
+  if (switched.has(dir)) return switched.get(dir);
+  if (!reported.has(dir)) {
+    reported.set(dir, git(dir, ["branch", "--show-current"]));
   }
-  return branches.get(dir);
+  return reported.get(dir);
+}
+
+/** Forget the recorded switches that a separator other than `&&` voids. */
+function crossSeparator(sep) {
+  if (sep === null || sep === "&&") return;
+  for (const [dir, branch] of switched) {
+    if (branch !== PROTECTED) switched.delete(dir);
+  }
 }
 
 /** Per directory: whether it is an AR-js-org repository (see scope.mjs). */
@@ -253,7 +286,12 @@ function block(dir, reason) {
 
 let cwd = input.cwd || process.cwd();
 
-for (const seg of segments(command)) {
+// A separator applies after the segment it ends, before the next one.
+let previous = null;
+for (const { text: seg, sep } of segments(command)) {
+  crossSeparator(previous);
+  previous = sep;
+  if (!seg) continue;
   const w = words(seg);
   const isCd = POWERSHELL
     ? POWERSHELL_CD_COMMANDS.has(w[0]?.toLowerCase())
@@ -290,7 +328,7 @@ for (const seg of segments(command)) {
 
   if (sub === "switch" || sub === "checkout") {
     const branch = switchedTo(sub, args, dir);
-    if (branch !== undefined) branches.set(dir, branch);
+    if (branch !== undefined) switched.set(dir, branch);
     continue;
   }
 
