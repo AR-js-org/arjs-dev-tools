@@ -185,6 +185,45 @@ describe("guard-protected-branches", () => {
     expect(guard("git push origin feature", onFeature, "PowerShell")).toBe(0);
   });
 
+  it("reads a backslash in PowerShell double quotes as a path separator", () => {
+    // The closing quote must not be swallowed, or the git command after it
+    // is never seen.
+    expect(
+      guard(`cd "${onMain}\\"; git commit -m x`, onFeature, "PowerShell"),
+    ).toBe(2);
+    expect(
+      guard(`Set-Location "${onMain}\\"; git commit -m x`, onFeature, "PowerShell"),
+    ).toBe(2);
+    expect(
+      guard(
+        `git -C "${onMain}\\" add -A; git -C "${onMain}\\" commit -m x`,
+        onFeature,
+        "PowerShell",
+      ),
+    ).toBe(2);
+    // The backtick is the escape character there.
+    expect(
+      guard('git commit -m "say `"hi`"; git push origin main later"', onFeature, "PowerShell"),
+    ).toBe(0);
+  });
+
+  it("follows Set-Location and Push-Location given a path parameter", () => {
+    expect(
+      guard(`Set-Location -Path "${onMain}"; git commit -m x`, onFeature, "PowerShell"),
+    ).toBe(2);
+    expect(
+      guard(`Push-Location -LiteralPath '${onMain}'; git commit -m x`, onFeature, "PowerShell"),
+    ).toBe(2);
+    expect(
+      guard(`sl -path "${onFeature}"; git commit -m x`, onMain, "PowerShell"),
+    ).toBe(0);
+  });
+
+  it("matches git case-insensitively in PowerShell", () => {
+    expect(guard("Git commit -m x", onMain, "PowerShell")).toBe(2);
+    expect(guard("Git commit -m x", onFeature, "PowerShell")).toBe(0);
+  });
+
   it("names no branch flow in the message", () => {
     const r = runHook(GUARD, {
       tool_name: "Bash",

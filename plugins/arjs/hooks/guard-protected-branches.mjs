@@ -19,10 +19,13 @@ import { git, isArjsRepo } from "./scope.mjs";
 
 const input = JSON.parse(readFileSync(0, "utf8") || "{}");
 const command = input.tool_input?.command || "";
-if (!/\bgit\b/.test(command)) process.exit(0);
-
 const PROTECTED = "main";
 const POWERSHELL = input.tool_name === "PowerShell";
+
+// PowerShell command names are case-insensitive: `Git commit` is git too.
+if (!new RegExp("\\bgit\\b", POWERSHELL ? "i" : "").test(command)) {
+  process.exit(0);
+}
 
 /** `git push` options whose value is the next word when not given with `=`. */
 const PUSH_VALUE_OPTIONS = new Set([
@@ -56,6 +59,7 @@ const WRAPPERS = new Set(["env", "command", "exec", "nohup", "time", "rtk"]);
  */
 function segments(cmd) {
   const s = cmd.replace(POWERSHELL ? /`\r?\n/g : /\\\r?\n/g, " ");
+  const escape = POWERSHELL ? "`" : "\\";
   const out = [];
   let cur = "";
   let quote = null;
@@ -63,8 +67,10 @@ function segments(cmd) {
     const c = s[i];
     if (quote) {
       cur += c;
-      // Inside double quotes a backslash escapes the next character.
-      if (quote === '"' && c === "\\" && i + 1 < s.length) cur += s[++i];
+      // Inside double quotes the escape character escapes the next one: a
+      // backslash in a POSIX shell, a backtick in PowerShell (where a
+      // backslash is a path separator, as in "C:\repo\").
+      if (quote === '"' && c === escape && i + 1 < s.length) cur += s[++i];
       else if (c === quote) quote = null;
       continue;
     }
@@ -140,8 +146,11 @@ for (const seg of segments(command)) {
   const isCd = POWERSHELL
     ? POWERSHELL_CD_COMMANDS.has(w[0]?.toLowerCase())
     : CD_COMMANDS.has(w[0]);
-  if (isCd && w[1]) {
-    const target = nativePath(w[1]);
+  // PowerShell may name the directory with a parameter: `Set-Location -Path x`.
+  const dirArg =
+    POWERSHELL && /^-(path|literalpath)$/i.test(w[1] ?? "") ? w[2] : w[1];
+  if (isCd && dirArg) {
+    const target = nativePath(dirArg);
     cwd = isAbsolute(target) ? target : resolve(cwd, target);
     continue;
   }

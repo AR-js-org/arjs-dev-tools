@@ -53,6 +53,12 @@ describe("isArjsRepo", () => {
     expect(isArjsRepo(dir)).toBe(false);
   });
 
+  it("is false when only a pushurl names AR-js-org", () => {
+    const dir = repo("pushurl", { origin: "https://github.com/someone/x.git" });
+    git(dir, "config", "remote.origin.pushurl", "https://github.com/AR-js-org/x.git");
+    expect(isArjsRepo(dir)).toBe(false);
+  });
+
   it("is false outside a repository", () => {
     const dir = mkdtempSync(join(base, "plain-"));
     expect(isArjsRepo(dir)).toBe(false);

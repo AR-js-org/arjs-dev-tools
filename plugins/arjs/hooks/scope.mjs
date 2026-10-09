@@ -23,6 +23,6 @@ export function git(cwd, args) {
  * repository.
  */
 export function isArjsRepo(dir) {
-  const urls = git(dir, ["config", "--get-regexp", "^remote\..*\.url$"]);
+  const urls = git(dir, ["config", "--get-regexp", "^remote\\..*\\.url$"]);
   return urls !== null && /github\.com[:/]ar-js-org\//i.test(urls);
 }
