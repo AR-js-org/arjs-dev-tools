@@ -4,12 +4,20 @@
 // separate pass. It acts only in AR-js-org repositories, and uses the edited
 // file's own repository (its local prettier and eslint), not the session's
 // working directory. Never blocks: problems are reported back as context only.
+// A tool the repository neither installs nor declares is skipped silently: it
+// does not use it.
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, extname, isAbsolute, join, relative } from "node:path";
 import { git, isArjsRepo } from "./scope.mjs";
 
-const input = JSON.parse(readFileSync(0, "utf8") || "{}");
+// Malformed input is not this hook's to report: do nothing.
+let input;
+try {
+  input = JSON.parse(readFileSync(0, "utf8") || "{}") ?? {};
+} catch {
+  process.exit(0);
+}
 const file = input.tool_input?.file_path;
 if (!file) process.exit(0);
 
@@ -52,13 +60,34 @@ function localBin(pkg) {
 }
 
 /**
+ * Whether the repository's root package.json lists `pkg` in `dependencies`
+ * or `devDependencies`. False without a readable package.json.
+ */
+function declared(pkg) {
+  try {
+    const manifest = JSON.parse(
+      readFileSync(join(root, "package.json"), "utf8"),
+    );
+    return Boolean(
+      manifest?.dependencies?.[pkg] ?? manifest?.devDependencies?.[pkg],
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Run a package's CLI on the file. Node runs the script directly, with the
  * file name as its own argument: no shell, so nothing in the name is
- * expanded. Returns null on success, otherwise what the tool printed.
+ * expanded. Returns null on success or when the repository does not use the
+ * package, otherwise what the tool printed.
  */
 function run(pkg, args) {
   const script = localBin(pkg);
-  if (!script) return `${pkg} is not installed; run npm install`;
+  if (!script) {
+    // Declared but missing: the dependencies were never installed.
+    return declared(pkg) ? `${pkg} is not installed; run npm install` : null;
+  }
   try {
     execFileSync(process.execPath, [script, ...args, file], {
       cwd: root,

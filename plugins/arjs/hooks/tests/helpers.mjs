@@ -97,17 +97,22 @@ const STUB_ESLINT = "process.exit(0);\n";
 
 /**
  * A throwaway git repository with stand-in prettier and eslint installed under
- * node_modules, and `origin` as its remote (none when `origin` is null). The
+ * node_modules, `origin` as its remote (none when `origin` is null), and
+ * `packageJson` written as its root package.json (none when it is null). The
  * caller removes the returned directory.
  */
 export function arjsProject({
   prettier = true,
   eslint = true,
   origin = "https://github.com/AR-js-org/fixture.git",
+  packageJson = null,
 } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "format-"));
   git(dir, "init");
   if (origin !== null) git(dir, "remote", "add", "origin", origin);
+  if (packageJson !== null) {
+    writeFileSync(join(dir, "package.json"), JSON.stringify(packageJson));
+  }
   for (const [name, enabled, script] of [
     ["prettier", prettier, STUB_PRETTIER],
     ["eslint", eslint, STUB_ESLINT],

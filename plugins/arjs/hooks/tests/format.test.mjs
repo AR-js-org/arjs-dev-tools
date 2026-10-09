@@ -8,7 +8,13 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { FORMAT, arjsProject, cleanupGitEnv, runHook } from "./helpers.mjs";
+import {
+  FORMAT,
+  arjsProject,
+  cleanupGitEnv,
+  runHook,
+  runHookRaw,
+} from "./helpers.mjs";
 
 /**
  * The format-on-edit hook, run as Claude Code runs it, against throwaway
@@ -95,10 +101,48 @@ describe("format-on-edit", () => {
   }, 30000);
 
   it("says when prettier is not installed", () => {
-    const dir = project({ prettier: false, eslint: false });
+    const dir = project({
+      prettier: false,
+      eslint: false,
+      packageJson: { devDependencies: { prettier: "^3.0.0" } },
+    });
     expect(edit(dir, "doc.md", "draft\n").stdout).toContain(
       "prettier is not installed",
     );
+  }, 30000);
+
+  it("says when eslint is not installed, if the repository declares it", () => {
+    const dir = project({
+      eslint: false,
+      packageJson: { dependencies: { eslint: "^9.0.0" } },
+    });
+    const out = edit(dir, "a.js", "#   x\n");
+    expect(out.after).toBe("# x\n"); // prettier, installed, still runs
+    expect(out.stdout).toContain("eslint is not installed");
+    expect(out.stdout).not.toContain("prettier");
+  }, 30000);
+
+  it("stays silent when the repository does not use prettier or eslint", () => {
+    // No declaration and nothing installed: with or without a package.json.
+    for (const packageJson of [null, { devDependencies: { vitest: "^5.0.0" } }]) {
+      const dir = project({ prettier: false, eslint: false, packageJson });
+      const out = edit(dir, "a.js", "#   Title\n");
+      expect(out.after).toBe("#   Title\n");
+      expect(out.stdout).toBe("");
+    }
+  }, 30000);
+
+  it("runs an installed prettier the repository does not declare", () => {
+    const dir = project({ packageJson: { devDependencies: {} } });
+    expect(edit(dir, "plain.md", "#   Title\n").after).toBe("# Title\n");
+  }, 30000);
+
+  it("exits quietly on malformed input", () => {
+    for (const stdin of ["\n", "not json", "null"]) {
+      const r = runHookRaw(FORMAT, stdin);
+      expect(r.status).toBe(0);
+      expect(r.stderr).toBe("");
+    }
   }, 30000);
 
   it("formats a file in another AR-js-org repository than the session's", () => {
