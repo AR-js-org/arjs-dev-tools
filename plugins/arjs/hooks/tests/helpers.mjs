@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -12,6 +12,10 @@ import { fileURLToPath } from "node:url";
 
 export const GUARD = fileURLToPath(
   new URL("../guard-protected-branches.mjs", import.meta.url),
+);
+
+export const FORMAT = fileURLToPath(
+  new URL("../format-on-edit.mjs", import.meta.url),
 );
 
 // An empty global git configuration, in a directory of its own so it exists
@@ -67,4 +71,47 @@ export function guard(command, cwd, toolName = "Bash") {
     tool_input: { command },
     cwd,
   }).status;
+}
+
+// Stand-ins for the repository's own prettier and eslint. The hook runs their
+// bin script with node and the edited file as the last argument, so these are
+// CommonJS scripts (the temp directories have no "type": "module").
+const STUB_PRETTIER = `const fs = require("fs");
+const file = process.argv.at(-1);
+const text = fs.readFileSync(file, "utf8");
+if (text.includes("SYNTAX ERROR")) {
+  process.stderr.write("SyntaxError: Unexpected token\\n");
+  process.exit(2);
+}
+fs.writeFileSync(file, text.replace("#   ", "# "));
+`;
+const STUB_ESLINT = "process.exit(0);\n";
+
+/**
+ * A throwaway git repository with stand-in prettier and eslint installed under
+ * node_modules, and `origin` as its remote (none when `origin` is null). The
+ * caller removes the returned directory.
+ */
+export function arjsProject({
+  prettier = true,
+  eslint = true,
+  origin = "https://github.com/AR-js-org/fixture.git",
+} = {}) {
+  const dir = mkdtempSync(join(tmpdir(), "format-"));
+  git(dir, "init");
+  if (origin !== null) git(dir, "remote", "add", "origin", origin);
+  for (const [name, enabled, script] of [
+    ["prettier", prettier, STUB_PRETTIER],
+    ["eslint", eslint, STUB_ESLINT],
+  ]) {
+    if (!enabled) continue;
+    const pkg = join(dir, "node_modules", name);
+    mkdirSync(pkg, { recursive: true });
+    writeFileSync(
+      join(pkg, "package.json"),
+      JSON.stringify({ name, bin: "cli.js" }),
+    );
+    writeFileSync(join(pkg, "cli.js"), script);
+  }
+  return dir;
 }
