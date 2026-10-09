@@ -102,7 +102,9 @@ describe("format-on-edit", () => {
   }, 30000);
 
   it("formats a file in another AR-js-org repository than the session's", () => {
-    const session = project();
+    // The session's repository has no CLIs: formatting only works if the
+    // hook uses the edited file's own repository.
+    const session = project({ prettier: false, eslint: false });
     const other = project();
     expect(edit(other, "plain.md", "#   Title\n", session).after).toBe(
       "# Title\n",
@@ -112,6 +114,12 @@ describe("format-on-edit", () => {
   it("leaves non-AR repositories alone", () => {
     const dir = project({ origin: "https://github.com/someone/x.git" });
     const out = edit(dir, "plain.md", "#   Title\n");
+    expect(out.after).toBe("#   Title\n");
+    expect(out.stdout).toBe("");
+  }, 30000);
+
+  it("leaves repositories without remotes alone", () => {
+    const out = edit(project({ origin: null }), "plain.md", "#   Title\n");
     expect(out.after).toBe("#   Title\n");
     expect(out.stdout).toBe("");
   }, 30000);
