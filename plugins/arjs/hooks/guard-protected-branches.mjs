@@ -1,8 +1,11 @@
 #!/usr/bin/env node
-// PreToolUse hook (Bash): refuse `git commit` on `main` and `git push` to
-// `main`. The branch flow is feature branch -> dev -> main through pull
-// requests; see AGENTS.md. Exit code 2 blocks the tool call and shows the
-// reason to Claude.
+// PreToolUse hook (Bash and PowerShell): refuse `git commit` on `main` and
+// `git push` to `main`. Work goes through a feature branch and a pull request;
+// see the repository's AGENTS.md. Exit code 2 blocks the tool call and shows
+// the reason to Claude.
+//
+// The hook ships in a plugin that runs in every repository, so it acts only in
+// AR-js-org repositories (see scope.mjs) and leaves all others alone.
 //
 // Each git invocation is checked in the repository it actually runs in: the
 // directory set by a preceding `cd` in the same command, or by `git -C`,
@@ -10,15 +13,16 @@
 // whatever the local refs say: a missing `origin/main` only means it was never
 // fetched, not that the remote has none. The first push of a new repository is
 // a one-off for a human to make.
-import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
+import { git, isArjsRepo } from "./scope.mjs";
 
 const input = JSON.parse(readFileSync(0, "utf8") || "{}");
 const command = input.tool_input?.command || "";
 if (!/\bgit\b/.test(command)) process.exit(0);
 
 const PROTECTED = "main";
+const POWERSHELL = input.tool_name === "PowerShell";
 
 /** `git push` options whose value is the next word when not given with `=`. */
 const PUSH_VALUE_OPTIONS = new Set([
@@ -29,6 +33,17 @@ const PUSH_VALUE_OPTIONS = new Set([
   "--exec",
 ]);
 
+/** Commands that change the directory; PowerShell's are case-insensitive. */
+const CD_COMMANDS = new Set(["cd"]);
+const POWERSHELL_CD_COMMANDS = new Set([
+  "cd",
+  "set-location",
+  "sl",
+  "chdir",
+  "push-location",
+  "pushd",
+]);
+
 /** Words that can precede the command a simple command runs. */
 const WRAPPERS = new Set(["env", "command", "exec", "nohup", "time", "rtk"]);
 
@@ -36,10 +51,11 @@ const WRAPPERS = new Set(["env", "command", "exec", "nohup", "time", "rtk"]);
  * Split a shell command into simple commands on && || ; | and newlines, but
  * not inside quotes: `git commit -m "a; b"` is one command. A
  * backslash-newline is a line continuation, not a boundary: the shell runs
- * `git \<newline>commit` as `git commit`.
+ * `git \<newline>commit` as `git commit`. In PowerShell the continuation is a
+ * backtick-newline, and a backslash is only a path separator.
  */
 function segments(cmd) {
-  const s = cmd.replace(/\\\r?\n/g, " ");
+  const s = cmd.replace(POWERSHELL ? /`\r?\n/g : /\\\r?\n/g, " ");
   const out = [];
   let cur = "";
   let quote = null;
@@ -109,22 +125,10 @@ function nativePath(p) {
   return m ? `${m[1].toUpperCase()}:${m[2] || "/"}` : p;
 }
 
-function git(cwd, args) {
-  try {
-    return execFileSync("git", args, {
-      cwd,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-    }).trim();
-  } catch {
-    return null;
-  }
-}
-
 function block(reason) {
   console.error(
     `Blocked: ${reason}. Work on a feature branch and open a pull request ` +
-      "into dev (see AGENTS.md, 'Git').",
+      "(see the repository's AGENTS.md, 'Git').",
   );
   process.exit(2);
 }
@@ -133,7 +137,10 @@ let cwd = input.cwd || process.cwd();
 
 for (const seg of segments(command)) {
   const w = words(seg);
-  if (w[0] === "cd" && w[1]) {
+  const isCd = POWERSHELL
+    ? POWERSHELL_CD_COMMANDS.has(w[0]?.toLowerCase())
+    : CD_COMMANDS.has(w[0]);
+  if (isCd && w[1]) {
     const target = nativePath(w[1]);
     cwd = isAbsolute(target) ? target : resolve(cwd, target);
     continue;
@@ -158,6 +165,8 @@ for (const seg of segments(command)) {
   }
   const sub = w[i];
   if (sub !== "commit" && sub !== "push") continue;
+
+  if (!isArjsRepo(dir)) continue; // not an AR-js-org repository, or none at all
 
   const branch = git(dir, ["branch", "--show-current"]);
   if (branch === null) continue; // not a repository

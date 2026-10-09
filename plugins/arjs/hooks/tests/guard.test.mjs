@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { cleanupGitEnv, git, guard } from "./helpers.mjs";
+import { GUARD, cleanupGitEnv, git, guard, runHook } from "./helpers.mjs";
 
 /**
  * The branch guard, run as Claude Code runs it: a Node process fed the hook's
@@ -17,6 +17,10 @@ describe("guard-protected-branches", () => {
   let onFeature;
   /** On `main`; the remote has `main`, but it was never fetched. */
   let unfetched;
+  /** On `main`; the only remote is not an AR-js-org one. */
+  let foreign;
+  /** On `main`; a fork whose `upstream` remote is an AR-js-org one. */
+  let fork;
 
   beforeAll(() => {
     base = mkdtempSync(join(tmpdir(), "guard-"));
@@ -42,7 +46,24 @@ describe("guard-protected-branches", () => {
     git(unfetched, "add", ".");
     git(unfetched, "commit", "-m", "init");
     git(unfetched, "remote", "add", "origin", remote);
-    // A dozen git processes: slow where every spawn is scanned, as on Windows.
+
+    // The guard acts only in AR-js-org repositories: point every fixture's
+    // origin at one, once the pushes and fetches above are done.
+    const arjs = "https://github.com/AR-js-org/fixture.git";
+    for (const dir of [onMain, onFeature, unfetched]) {
+      git(dir, "remote", "set-url", "origin", arjs);
+    }
+
+    // Unborn `main` is enough: the guard only reads the current branch.
+    foreign = join(base, "foreign");
+    git(base, "init", "-b", "main", foreign);
+    git(foreign, "remote", "add", "origin", "https://github.com/someone/other.git");
+
+    fork = join(base, "fork");
+    git(base, "init", "-b", "main", fork);
+    git(fork, "remote", "add", "origin", "https://github.com/someone/AR.js-next.git");
+    git(fork, "remote", "add", "upstream", "git@github.com:ar-js-org/AR.js-next.git");
+    // Dozens of git processes: slow where every spawn is scanned, as on Windows.
   }, 60000);
 
   afterAll(() => {
@@ -147,5 +168,30 @@ describe("guard-protected-branches", () => {
     expect(guard("git push --repo=origin main", onFeature)).toBe(2);
     expect(guard("git push --repo origin main", onFeature)).toBe(2);
     expect(guard("git push --repo=origin feature", onFeature)).toBe(0);
+  });
+
+  it("acts only in AR-js-org repositories", () => {
+    expect(guard("git commit -m x", foreign)).toBe(0);
+    expect(guard("git push origin main", foreign)).toBe(0);
+    expect(guard("git commit -m x", fork)).toBe(2); // upstream, SSH, lower-case owner
+  });
+
+  it("checks PowerShell commands too", () => {
+    expect(
+      guard(`Set-Location "${onMain}"; git commit -m x`, onFeature, "PowerShell"),
+    ).toBe(2);
+    expect(guard(`cd ${onMain}; git commit -m x`, onFeature, "PowerShell")).toBe(2);
+    expect(guard("git push `\n  origin main", onFeature, "PowerShell")).toBe(2);
+    expect(guard("git push origin feature", onFeature, "PowerShell")).toBe(0);
+  });
+
+  it("names no branch flow in the message", () => {
+    const r = runHook(GUARD, {
+      tool_name: "Bash",
+      tool_input: { command: "git commit -m x" },
+      cwd: onMain,
+    });
+    expect(r.stderr).not.toContain("into dev");
+    expect(r.stderr).toContain("AGENTS.md");
   });
 });
