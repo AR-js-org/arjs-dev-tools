@@ -34,7 +34,7 @@ up automatically when a task matches.
 
 | Hook                   | Event / matcher                        | Does                                                                                                                   |
 | ---------------------- | -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| protected-branch guard | `PreToolUse` `Bash\|PowerShell`        | Refuses `git commit` on `main` and any push that reaches `main`; exits 2 with a message                                |
+| protected-branch guard | `PreToolUse` `Bash\|PowerShell`        | Refuses `git commit` on `main` and a push to `main`; exits 2 with a message                                            |
 | format-on-edit         | `PostToolUse` `Edit\|Write\|MultiEdit` | Runs the edited file's repository-local `prettier` and `eslint --fix`; problems come back as context, never as a block |
 
 Both hooks act only in AR-js-org repositories. A repository is in scope when
@@ -43,6 +43,9 @@ any of its `remote.<name>.url` values matches `github.com[:/]AR-js-org/`
 counts too. Anywhere else they do nothing. The formatter uses the repository
 that holds the edited file, not the session's working directory, and skips
 `node_modules`, `dist`, `types`, `coverage` and `vendor`.
+
+The guard is a guard-rail against mistakes, not an access control: branch
+protection on GitHub stays the real enforcement.
 
 The hook scripts need only Node built-ins. Running their tests needs Node
 22.12 or later (see [Run the tests](#run-the-tests)).
@@ -74,6 +77,7 @@ plugin's hook and the repository's copy run. A repository therefore drops its
 ## Layout
 
 ```
+AGENTS.md
 .claude-plugin/marketplace.json
 .github/workflows/test.yml
 package.json

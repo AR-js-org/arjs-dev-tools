@@ -75,7 +75,8 @@ same commit as `package.json`, PR into `dev`.
    git tag v<version> && git push origin v<version>
    ```
 
-3. Re-sync `dev`: `git switch dev && git merge --ff-only origin/main && git push`.
+3. Re-sync `dev`:
+   `git switch dev && git merge --ff-only origin/main && git push origin dev`.
 
 ## 4. Verify
 
