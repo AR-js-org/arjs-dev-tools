@@ -1,6 +1,6 @@
 {
   "name": "arjs",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Skills for AR.js-next, arjs-plugin-artoolkit and arjs-plugin-threejs: release process, cross-repo event contract changes, npm-based Vite examples.",
   "author": {
     "name": "AR-js-org",
