@@ -52,22 +52,46 @@ The hook scripts need only Node built-ins. Running their tests needs Node
 
 ## Use in a repository
 
-Commit this to the repository's `.claude/settings.json`:
+Commit this to the repository's `.claude/settings.json`, in exactly this form:
+it is how `claude plugin install` writes the file, so installing leaves it
+unchanged.
 
 ```json
 {
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "enabledPlugins": {
+    "arjs@arjs-dev-tools": true
+  },
   "extraKnownMarketplaces": {
     "arjs-dev-tools": {
-      "source": { "source": "github", "repo": "AR-js-org/arjs-dev-tools" }
+      "source": {
+        "source": "github",
+        "repo": "AR-js-org/arjs-dev-tools"
+      }
     }
-  },
-  "enabledPlugins": { "arjs@arjs-dev-tools": true }
+  }
 }
 ```
 
-A contributor who trusts the repository folder gets the marketplace
-registered, and `arjs` is enabled without a manual install. Installing it by
-hand (see [Install](#install)) still works.
+Each contributor then, once per clone:
+
+1. Opens the repository in Claude Code and trusts the folder. This registers
+   the `arjs-dev-tools` marketplace; it does not load the plugin yet.
+2. Installs the plugin for the project, from the repository root:
+
+   ```bash
+   claude plugin install arjs@arjs-dev-tools --scope project
+   ```
+
+3. Starts a new session and checks `/hooks`: the guard and the formatter are
+   listed as `arjs@arjs-dev-tools`.
+
+The marketplace serves `main`. To pick up a newer release later:
+
+```bash
+claude plugin marketplace update arjs-dev-tools
+claude plugin update arjs@arjs-dev-tools
+```
 
 During migration, Claude Code does not deduplicate project and plugin hooks:
 if a repository still has its own copy under `.claude/hooks`, both the
@@ -102,8 +126,11 @@ npm test
 The tests cover the hook scripts and run on Linux and Windows in CI. They need
 Node 22.12 or later. They exercise the hooks directly; to check the wiring
 through Claude Code itself, start `claude --plugin-dir ./plugins/arjs` in a
-scratch clone of an AR-js-org repository on `main` and ask for a
-`git commit`, which should be refused (manual check).
+scratch clone of an AR-js-org repository on `main`, with the clone's own
+`.claude/hooks` removed, and ask Claude to run `git commit --allow-empty -m test`
+with the Bash tool even if it expects a refusal; the guard should block it
+(manual check). Claude often declines a commit on `main` by itself after
+reading the repository's `AGENTS.md`, which never reaches the hook.
 
 ## License
 
