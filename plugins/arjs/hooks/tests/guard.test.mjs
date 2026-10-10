@@ -199,18 +199,25 @@ describe("guard-protected-branches", () => {
     // The closing quote must not be swallowed, or the git command after it
     // is never seen.
     expect(
-      guard(`cd "${onMain}\\"; git commit -m x`, onFeature, "PowerShell"),
+      guard('git commit -m "C:\\dir\\"; git push origin main', onFeature, "PowerShell"),
     ).toBe(2);
-    expect(
-      guard(`Set-Location "${onMain}\\"; git commit -m x`, onFeature, "PowerShell"),
-    ).toBe(2);
-    expect(
-      guard(
-        `git -C "${onMain}\\" add -A; git -C "${onMain}\\" commit -m x`,
-        onFeature,
-        "PowerShell",
-      ),
-    ).toBe(2);
+    // A trailing backslash only names the same directory where it is a path
+    // separator; elsewhere `on-main\` is another (missing) directory.
+    if (process.platform === "win32") {
+      expect(
+        guard(`cd "${onMain}\\"; git commit -m x`, onFeature, "PowerShell"),
+      ).toBe(2);
+      expect(
+        guard(`Set-Location "${onMain}\\"; git commit -m x`, onFeature, "PowerShell"),
+      ).toBe(2);
+      expect(
+        guard(
+          `git -C "${onMain}\\" add -A; git -C "${onMain}\\" commit -m x`,
+          onFeature,
+          "PowerShell",
+        ),
+      ).toBe(2);
+    }
     // The backtick is the escape character there.
     expect(
       guard('git commit -m "say `"hi`"; git push origin main later"', onFeature, "PowerShell"),
