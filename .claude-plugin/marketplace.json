@@ -9,8 +9,8 @@
     {
       "name": "arjs",
       "source": "./plugins/arjs",
-      "description": "Skills for AR.js-next, arjs-plugin-artoolkit and arjs-plugin-threejs: release process, cross-repo event contract changes, npm-based Vite examples.",
-      "version": "0.1.0"
+      "description": "Skills and hooks for AR.js-next, arjs-plugin-artoolkit and arjs-plugin-threejs: release process, cross-repo event contract changes, npm-based Vite examples, protected-branch guard and format-on-edit.",
+      "version": "0.3.0"
     }
   ]
 }
